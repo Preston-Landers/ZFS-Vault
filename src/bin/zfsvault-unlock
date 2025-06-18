@@ -1,0 +1,434 @@
+#!/bin/bash
+# zfsvault-unlock
+
+# Defaults
+BOOT_MODE=false
+VERBOSE=false
+CONFIG_FILE="/etc/zfsvault/zfsvault.conf"
+
+# TODO: future features?
+# --dry-run
+
+# TODO: check if /run/zfsvault-unlocked-marker already exists?
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --boot)
+        BOOT_MODE=true
+        shift
+        ;;
+    -v | --verbose)
+        VERBOSE=true
+        shift
+        ;;
+    -c | --config)
+        CONFIG_FILE="$2"
+        shift 2
+        ;;
+    -h | --help)
+        cat <<EOF
+Usage: $0 [OPTIONS]
+
+Options:
+  --boot         Running as getty override (internal use)
+  -v, --verbose  Enable verbose output
+  -c, --config   Specify config file (default: /etc/zfsvault/zfsvault.conf)
+  -h, --help     Show this help
+
+Examples:
+  $0                           # Normal run with defaults
+  $0 -v                        # Verbose output
+  $0 -c /tmp/test.conf         # Use alternative config
+  $0 -v -c /tmp/test.conf      # Multiple options
+EOF
+        exit 0
+        ;;
+    *)
+        echo "Unknown option: $1" >&2
+        echo "Try '$0 --help' for more information." >&2
+        exit 1
+        ;;
+    esac
+done
+
+log_error() {
+    local msg="$1"
+    logger "zfsvault-unlock: ERROR: $msg"
+    echo "ERROR: $msg" >&2
+}
+
+log_info() {
+    local msg="$1"
+    logger "zfsvault-unlock: $msg"
+    $VERBOSE && echo "$msg"
+}
+
+log_always() {
+    local msg="$1"
+    logger "zfsvault-unlock: $msg"
+    echo "$msg"
+}
+
+log_debug() {
+    local msg="$1"
+    logger "zfsvault-unlock: DEBUG: $msg"
+    # Only to stdout if explicitly debugging
+    [[ "${DEBUG:-}" == "1" ]] && echo "DEBUG: $msg"
+}
+
+# Error handler function
+handle_error() {
+    local error_msg="$1"
+    log_error "$error_msg"
+    echo -e "\n*** ZFS Vault Unlock Error ***"
+    echo "$error_msg"
+
+    if $BOOT_MODE; then
+        echo -e "\nPress Enter to continue to login prompt..."
+        read -r
+        # Hand off to getty
+        call_getty
+
+    else
+        exit 1
+    fi
+}
+
+handle_interrupt() {
+    log_error "Interrupt received, cleaning up..."
+    # Clear any sensitive data
+    unset PASSWORD
+    # Unmount vault if it was mounted
+    if [[ -n "${vault_mount:-}" ]] && mountpoint -q "$vault_mount" 2>/dev/null; then
+        zfs umount "${config[vault]}" 2>/dev/null
+    fi
+    exit 130 # indicate that we were interrupted
+}
+
+call_getty() {
+    log_debug "Calling: exec /sbin/agetty -o '-p -- \\u' --noclear tty1 linux"
+    # TODO: more portable way to do this...? Override in config file?
+    exec /sbin/agetty -o '-p -- \\u' --noclear tty1 linux
+}
+
+# Check that zfs exists
+if ! command -v zfs &>/dev/null; then
+    handle_error "zfs command not found. Please install ZFS utilities."
+fi
+
+# Config file checks
+if [[ ! -e "$CONFIG_FILE" ]]; then
+    handle_error "Configuration file not found: $CONFIG_FILE"
+elif [[ ! -r "$CONFIG_FILE" ]]; then
+    handle_error "Cannot read configuration file: $CONFIG_FILE"
+fi
+
+declare -A config
+declare -A datasets
+current_section=""
+
+# Parse config file
+parse_config() {
+    local config_file="${1:-/etc/zfsvault/zfsvault.conf}"
+
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+        # Remove inline comments and trim whitespace
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}" # trim leading
+        line="${line%"${line##*[![:space:]]}"}" # trim trailing
+
+        # Section header [section]
+        if [[ "$line" =~ ^\[([^]]+)\]$ ]]; then
+            current_section="${BASH_REMATCH[1]}"
+            continue
+        fi
+
+        # Key = value pairs
+        if [[ "$line" =~ ^([^=]+)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+
+            # Trim whitespace from key and value
+            key="${key#"${key%%[![:space:]]*}"}"
+            key="${key%"${key##*[![:space:]]}"}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+
+            # Remove quotes if present
+            [[ "$value" =~ ^\"(.*)\"$ ]] && value="${BASH_REMATCH[1]}"
+
+            # Store based on section
+            if [[ "$current_section" == "settings" ]]; then
+                # Convert hyphens to underscores for bash variables
+                key="${key//-/_}"
+                config["$key"]="$value"
+            else
+                # For dataset sections, prefix with dataset name
+                datasets["${current_section}:${key}"]="$value"
+            fi
+        fi
+    done <"$config_file"
+}
+
+# Helper function to get dataset config
+get_dataset_config() {
+    local dataset="$1"
+    local key="$2"
+    echo "${datasets["${dataset}:${key}"]:-}"
+}
+
+parse_config "${CONFIG_FILE}" || {
+    handle_error "Failed to parse configuration file: $CONFIG_FILE"
+}
+
+# Log script start
+log_info "zfsvault-unlock: Starting ZFS Unlock Script"
+
+log_debug "\nAll elements in config:"
+for key in "${!config[@]}"; do
+    log_debug "Key: $key, Value: ${config[$key]}"
+done
+
+log_debug "\nAll elements in datasets:"
+for key in "${!datasets[@]}"; do
+    log_debug "Key: $key, Value: ${datasets[$key]}"
+done
+
+validate_config() {
+    # Check required settings
+    local required_settings=("vault" "vault_key_dir")
+    for setting in "${required_settings[@]}"; do
+        if [[ -z "${config[$setting]:-}" ]]; then
+            handle_error "Missing required setting: $setting"
+        fi
+    done
+
+    # Validate numeric settings
+    if [[ ! "${config[retry_count]:-3}" =~ ^[0-9]+$ ]]; then
+        handle_error "Invalid retry_count: must be a number"
+    fi
+
+    # Validate on_fail values
+    case "${config[on_fail]:-exit}" in
+    reboot | shell | exit) ;;
+    *) handle_error "Invalid on_fail value: ${config[on_fail]}" ;;
+    esac
+
+    # Check if the vault exists per ZFS
+    if ! zfs list "${config[vault]}" &>/dev/null; then
+        handle_error "Vault dataset not found: ${config[vault]}"
+    fi
+}
+
+validate_config
+
+# Setup trap after config is parsed, because we only really need it
+# during password prompt and subsequent.
+trap 'handle_interrupt' INT TERM
+
+# After parsing config, validate datasets
+for key in "${!datasets[@]}"; do
+    if [[ "$key" =~ ^([^:]+):key$ ]]; then
+        dataset="${BASH_REMATCH[1]}"
+        if ! zfs list "$dataset" &>/dev/null; then
+            log_error "Dataset not found: $dataset"
+            # Optionally continue or fail based on config?
+        fi
+    fi
+done
+
+# Password handling with retry logic
+attempts=0
+max_attempts="${config[retry_count]:-3}"
+
+read_password() {
+    local timeout="${config[password_timeout]:-0}"
+    if command -v systemd-ask-password &>/dev/null && [[ -n "${SYSTEMD_EXEC_PID:-}" ]]; then
+        systemd-ask-password --timeout="$timeout" "Enter ZFS vault password:"
+    else
+        # Fallback to standard read
+        read -s -p "Enter vault password: " password
+        echo # New line after password
+        echo "$password"
+    fi
+}
+
+# systemd-based version
+while [ $attempts -lt $max_attempts ]; do
+    PASSWORD=$(read_password) || {
+        # User pressed Ctrl+C or another error
+        log_error "Password prompt cancelled"
+        if $BOOT_MODE; then
+            # Just exit cleanly to getty without the error prompt
+            call_getty
+        else
+            exit 1
+        fi
+    }
+
+    if echo "$PASSWORD" | zfs load-key "${config[vault]}" 2>/dev/null; then
+        PASSWORD=""
+        log_info "zfsvault-unlock: Vault unlocked successfully"
+        break
+    else
+        PASSWORD=""
+        ((attempts++))
+        if [ $attempts -lt $max_attempts ]; then
+            log_debug "Incorrect password. Try again ($attempts/$max_attempts)"
+            echo "Incorrect password. Try again ($attempts/$max_attempts)"
+        fi
+    fi
+done
+
+unset PASSWORD
+
+# Handle failure
+if [ $attempts -eq $max_attempts ]; then
+    log_error "zfsvault-unlock: Max password attempts reached"
+    case "${config[on_fail]}" in
+    reboot)
+        log_always "Max attempts reached. Rebooting in 5 seconds..."
+        sleep 5
+        systemctl reboot
+        ;;
+    shell)
+        log_always "Max attempts reached. Dropping to shell..."
+        # TODO: should we use $SHELL here if defined?
+        /bin/bash
+        ;;
+    *)
+        log_always "Max attempts reached. Exiting..."
+        exit 1
+        ;;
+    esac
+fi
+
+# Mount vault - just mount it wherever ZFS wants and find out where that is
+if ! zfs mount "${config[vault]}" 2>/dev/null; then
+    # Check if it failed because already mounted
+    if mountpoint -q "$(zfs get -H -o value mountpoint "${config[vault]}")" 2>/dev/null; then
+        log_debug "Vault already mounted"
+    else
+        handle_error "Failed to mount vault: ${config[vault]}"
+    fi
+fi
+
+# Get the actual mount point
+vault_mount=$(zfs get -H -o value mountpoint "${config[vault]}")
+if [[ "$vault_mount" == "none" ]] || [[ "$vault_mount" == "-" ]] || [[ ! -d "$vault_mount" ]]; then
+    handle_error "Vault has no valid mountpoint"
+fi
+
+key_dir="$vault_mount${config[vault_key_dir]}"
+if [[ ! -d "$key_dir" ]]; then
+    handle_error "Key directory within vault not found: $key_dir"
+fi
+
+declare -a unlocked_datasets=()
+declare -a failed_datasets=()
+
+# Count total datasets configured
+declare -i total_datasets=0
+declare -i skipped_datasets=0
+
+# Unlock all configured datasets
+for key in "${!datasets[@]}"; do
+    if [[ "$key" =~ ^([^:]+):key$ ]]; then
+        ((total_datasets++))
+        dataset="${BASH_REMATCH[1]}"
+        keyfile=$(get_dataset_config "$dataset" "key")
+        load_opts=$(get_dataset_config "$dataset" "load-key-options")
+        mount_opts=$(get_dataset_config "$dataset" "mount-options")
+
+        if [[ ! -f "${key_dir}/${keyfile}" ]]; then
+            log_error "Key file not found: ${key_dir}/${keyfile}"
+            ((skipped_datasets++))
+            continue
+        fi
+
+        # Load key
+        if cat "${key_dir}/${keyfile}" | zfs load-key $load_opts "$dataset"; then
+            unlocked_datasets+=("$dataset")
+            log_info "zfsvault-unlock: Unlocked $dataset"
+
+            # Mount if auto-mount is enabled
+            if [[ "${config[auto_mount]}" == "true" ]]; then
+                if ! zfs mount $mount_opts "$dataset" 2>/dev/null; then
+                    log_error "Failed to mount $dataset after unlock"
+                fi
+            fi
+        else
+            failed_datasets+=("$dataset")
+            log_error "zfsvault-unlock: Failed to unlock $dataset"
+        fi
+    fi
+done
+
+# Unmount vault if configured
+if [[ "${config[unmount_after_use]}" == "true" ]]; then
+    zfs umount "${config[vault]}"
+    log_info "zfsvault-unlock: Vault unmounted"
+fi
+
+# Create marker file - systemd path watcher handles the rest
+touch /run/zfsvault-unlocked-marker
+
+# Run post-unlock scripts if enabled
+if [[ "${config[post_scripts]}" == "true" ]] && [[ -d /etc/zfsvault/post-unlock.d ]]; then
+    for script in /etc/zfsvault/post-unlock.d/*.sh; do
+        if [[ -x "$script" ]]; then
+            log_info "Running post-unlock script: $script"
+            if ! "$script"; then
+                log_error "Post-unlock script failed: $script"
+                # Continue with other scripts
+            fi
+        fi
+    done
+fi
+
+# Show final mount status if verbose
+if $VERBOSE && [[ ${#unlocked_datasets[@]} -gt 0 ]]; then
+    log_always "\nzfsvault-unlock mount status:"
+    # Create a regex pattern from unlocked datasets
+    pattern="${config[vault]}"
+    for ds in "${unlocked_datasets[@]}"; do
+        pattern="${pattern}|${ds}"
+    done
+    zfs list -o name,mounted,mountpoint | grep -E "(NAME|${pattern})"
+fi
+
+# Only show summary if there were datasets to unlock
+
+# Now show summary based on what was configured
+if [[ $total_datasets -eq 0 ]]; then
+    log_always "No datasets configured for unlock"
+elif [[ $skipped_datasets -gt 0 ]]; then
+    log_always "Unlock summary: ${#unlocked_datasets[@]} succeeded, ${#failed_datasets[@]} failed, $skipped_datasets skipped (missing keys)"
+else
+    if [[ ${#unlocked_datasets[@]} -gt 0 || ${#failed_datasets[@]} -gt 0 ]]; then
+        if [[ ${#failed_datasets[@]} -eq 0 ]]; then
+            log_always "✓ All ${#unlocked_datasets[@]} datasets unlocked successfully"
+        else
+            log_always "Unlock summary: ${#unlocked_datasets[@]} succeeded, ${#failed_datasets[@]} failed"
+            if [[ ${#failed_datasets[@]} -gt 0 ]]; then
+                log_error "Failed datasets: ${failed_datasets[*]}"
+            fi
+        fi
+    fi
+fi
+
+# If vault is still mounted and should be unmounted, do it now
+if [[ "${config[unmount_after_use]}" != "true" ]] && [[ -n "$vault_mount" ]]; then
+    # Vault is still mounted but we're about to exec
+    log_debug "Vault remains mounted at: $vault_mount"
+fi
+
+# Hand back to getty
+if $BOOT_MODE; then
+    call_getty
+fi
