@@ -1,0 +1,13 @@
+# /etc/systemd/system/zfsvault-unlocked.path
+# Use of this file is optional; it's only used if you need
+# other services to depend on the `zfsvault-unlocked.service` as a signal.
+[Unit]
+Description=Watch for ZFS-Vault unlock completion
+Documentation=man:systemd.path(5)
+
+[Path]
+PathExists=/run/zfsvault-unlocked-marker
+Unit=zfsvault-unlocked.service
+
+[Install]
+WantedBy=multi-user.target

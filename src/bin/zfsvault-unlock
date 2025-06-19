@@ -1,5 +1,5 @@
 #!/bin/bash
-# zfsvault-unlock
+# zfsvault-unlock v0.1.0
 
 # Defaults
 BOOT_MODE=false
@@ -215,7 +215,7 @@ validate_config() {
 
     # Validate on_fail values
     case "${config[on_fail]:-exit}" in
-    reboot | shell | exit) ;;
+    reboot | exit) ;;
     *) handle_error "Invalid on_fail value: ${config[on_fail]}" ;;
     esac
 
@@ -247,7 +247,7 @@ attempts=0
 max_attempts="${config[retry_count]:-3}"
 
 read_password() {
-    local timeout="${config[password_timeout]:-0}"
+    local timeout="${config[password - timeout]:-0}"
     if command -v systemd-ask-password &>/dev/null && [[ -n "${SYSTEMD_EXEC_PID:-}" ]]; then
         systemd-ask-password --timeout="$timeout" "Enter ZFS vault password:"
     else
@@ -262,13 +262,7 @@ read_password() {
 while [ $attempts -lt $max_attempts ]; do
     PASSWORD=$(read_password) || {
         # User pressed Ctrl+C or another error
-        log_error "Password prompt cancelled"
-        if $BOOT_MODE; then
-            # Just exit cleanly to getty without the error prompt
-            call_getty
-        else
-            exit 1
-        fi
+        handle_error "Password prompt cancelled"
     }
 
     if echo "$PASSWORD" | zfs load-key "${config[vault]}" 2>/dev/null; then
@@ -280,7 +274,7 @@ while [ $attempts -lt $max_attempts ]; do
         ((attempts++))
         if [ $attempts -lt $max_attempts ]; then
             log_debug "Incorrect password. Try again ($attempts/$max_attempts)"
-            echo "Incorrect password. Try again ($attempts/$max_attempts)"
+            echo "Incorrect password. Try again ($attempts/$max_attempts)."
         fi
     fi
 done
@@ -296,14 +290,9 @@ if [ $attempts -eq $max_attempts ]; then
         sleep 5
         systemctl reboot
         ;;
-    shell)
-        log_always "Max attempts reached. Dropping to shell..."
-        # TODO: should we use $SHELL here if defined?
-        /bin/bash
-        ;;
     *)
         log_always "Max attempts reached. Exiting..."
-        exit 1
+        handle_error "Max attempts reached."
         ;;
     esac
 fi

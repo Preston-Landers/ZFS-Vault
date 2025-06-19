@@ -1,0 +1,20 @@
+# /etc/systemd/system/zfsvault-unlocked.service
+
+# This service exists solely as a synchronization point
+# Other services can use After=zfsvault-unlocked.service
+
+# Use of this file is optional; it's only used if you need
+# other services to depend on this service as a signal that
+# the vault has been unlocked. It's triggered by the
+# zfsvault-unlocked.path watcher on the /run/zfsvault-unlocked-marker.
+# The dependent services can set `After=zfsvault-unlocked.service`
+
+[Unit]
+Description=ZFS Encrypted datasets are unlocked and mounted
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+# RemainAfterExit=yes is crucial - it keeps the service "active"
+# so other services can depend on it

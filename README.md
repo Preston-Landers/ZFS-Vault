@@ -5,8 +5,6 @@
 Unlock multiple encrypted [ZFS](https://openzfs.org/) datasets on boot with a
 single password.
 
-TODO: missing service definition files
-
 ## Quick summary
 
 This is a minimally-invasive systemd-based solution for unlocking encrypted ZFS
@@ -16,7 +14,7 @@ designed for Proxmox Virtual Environment (PVE) but it should work on any system
 with ZFS and systemd. This is _not_ intended for high-security environments, but
 more for casual or homelab use where you still want encrypted ZFS datasets.
 
-## Why would you want to use this?
+### Why would you want to use this?
 
 If you are not using Full Disk Encryption (FDE) on your system, you may still
 have multiple encrypted ZFS datasets that require separate passwords or key
@@ -42,6 +40,63 @@ start. This solution allows you to unlock all of them with a single password.
   is recommended to use separate means to backup both your raw ZFS encryption
   keys and the vault pool.
 
+## Contents
+
+- [Quick summary](#quick-summary)
+  - [Why would you want to use this?](#why-would-you-want-to-use-this)
+  - [Why would you NOT want to use this?](#why-would-you-not-want-to-use-this)
+- [Contents](#contents)
+- [Quick start](#quick-start)
+- [How does this work exactly?](#how-does-this-work-exactly)
+- [Solution description](#solution-description)
+  - [Security considerations](#security-considerations)
+  - [Headless System Considerations](#headless-system-considerations)
+  - [Vault creation best practices](#vault-creation-best-practices)
+  - [Platform Compatibility](#platform-compatibility)
+  - [Limitations](#limitations)
+- [Use Cases](#use-cases)
+  - [Core Feature: Single-Password ZFS Unlock](#core-feature-single-password-zfs-unlock)
+  - [Optional Feature: Run on startup](#optional-feature-run-on-startup)
+  - [Optional Feature: Service Auto-Start](#optional-feature-service-auto-start)
+- [Prerequisites](#prerequisites)
+- [How It Works: The Architectural Flow](#how-it-works-the-architectural-flow)
+- [TODO Future Features](#todo-future-features)
+- [Installation](#installation)
+  - [Gather the required information](#gather-the-required-information)
+  - [Create the config file](#create-the-config-file)
+  - [Create the vault](#create-the-vault)
+  - [Install the unlock script](#install-the-unlock-script)
+  - [Boot override - optional](#boot-override---optional)
+  - [Post-unlock scripts - optional](#post-unlock-scripts---optional)
+  - [Setup services - optional](#setup-services---optional)
+  - [Test your setup](#test-your-setup)
+- [Backup strategy](#backup-strategy)
+- [Uninstallation](#uninstallation)
+  - [Step 1: Restore Container Auto-Start](#step-1-restore-container-auto-start)
+  - [Step 2: Remove Custom Services](#step-2-remove-custom-services)
+  - [Step 3: Restore Original Getty](#step-3-restore-original-getty)
+  - [Step 4: Clean Up Runtime Files](#step-4-clean-up-runtime-files)
+- [Troubleshooting](#troubleshooting)
+- [Code architecture](#code-architecture)
+  - [Architecture diagram](#architecture-diagram)
+
+## Quick start
+
+Example: Unlock tank/data using vault at rpool/vault.
+
+1. [Create the vault](#vault-creation-best-practices) and put your key file for
+   `tank/data` in the file `keys/data.key` inside the vault dataset.
+2. Create `/etc/zfsvault/zfsvault.conf` with minimal
+   [config](#create-the-config-file)
+3. Copy [unlock script](#install-the-unlock-script)
+4. Test with: `/usr/local/bin/zfsvault-unlock`
+5. If desired, set up the [boot override](#boot-override---optional) to run the
+   unlock script automatically on boot.
+6. Optionally, create [post-unlock scripts](#post-unlock-scripts---optional) to
+   run after the vault is unlocked, or
+   [setup services](#setup-services---optional) to start after the vault is
+   unlocked.
+
 ## How does this work exactly?
 
 - Your password-protected "ZFS Vault" dataset stores encryption keys for other
@@ -62,9 +117,8 @@ start. This solution allows you to unlock all of them with a single password.
     (by default) closes the vault.
   - The `zfsvault-unlock` script can also be run manually outside of or instead
     of the boot override.
-  - TODO: if you fail the password, currently it waits a few seconds and reboots
-    for you to try again. We may refine this behavior, including a chance to
-    just cancel the unlock instead of reboot. And password retry.
+  - There are options for `retry-count` and `password-timeout`, what to do if
+    the password fails - `on-fail` can be `reboot`, or `exit` to a login prompt.
   - You are not otherwise locked out of the system and can switch to another
     physical or virtual console with this boot override.
 
@@ -77,7 +131,9 @@ start. This solution allows you to unlock all of them with a single password.
 - When the unlock completes, a marker file is created at
   `/run/zfsvault-unlocked-marker`. A systemd path unit (`.path`) detects this
   file's creation, which in turn triggers a service
-  (`zfsvault-unlocked.service`) to start.
+  (`zfsvault-unlocked.service`) to start. This service only runs `/bin/true` but
+  has `RemainAfterExit` and serves as a signal that the ZFS vault has been
+  unlocked.
 
   - You can check this unlock status in your own scripts:
 
@@ -88,25 +144,27 @@ start. This solution allows you to unlock all of them with a single password.
     fi
     ```
 
-- An example LXC container starter service is provided:
-  `zfsvault-post-unlocked.service`. This can be customized to your needs to
-  start containers for services (SMB, etc.) or other requirements.
+- **OPTIONAL:** If you want to configure other systemd services to depend on the
+  ZFS vault being unlocked, you can do so by making them depend on the
+  `zfsvault-unlocked.service`. You can do this by adding
+  `After=zfsvault-unlocked.service` to the service unit file of your choice.
 
-  - The example script provided starts two LXC containers (100 and 101) that
-    depend on the unlocked datasets.
+- However, if you only need to run a few scripts after the ZFS vault is
+  unlocked, you can place them in the `/etc/zfsvault/post-unlock.d/` directory.
+  These scripts will be executed after the vault is unlocked at the end of the
+  unlock script.
 
-- If you so choose, other systemd services can be made to depend on
-  `zfsvault-unlocked.service` to start only after the ZFS vault has been
-  unlocked.
+  - **Important:** like the main unlock script, these scripts will run as root,
+    so they should be owned by root and have restrictive permissions (e.g.,
+    `chmod 700`).
+  - The scripts in this directory should be executable and will run in
+    alphanumeric order based on their filenames.
+  - An example script is provided to start LXC containers that depend on the
+    unlocked datasets. You can change or customize this script to start any
+    services, programs or other actions you need after the ZFS vault is
+    unlocked.
 
-## TODO / missing features
-
-Configuration options are not implemented.
-
-Need "quick start" and finish the actual full installation section. And
-uninstall.
-
-## Solution Overview
+## Solution description
 
 This solution provides a combination of features that can be used separately or
 together:
@@ -253,60 +311,6 @@ This package does NOT handle:
   unlock the extra datasets, but this package does not handle or require FDE
   itself.
 
-## Code architecture
-
-The installed file layout looks like this:
-
-```text
-/etc/zfsvault/
-├── zfsvault.conf                # Main configuration
-└── post-unlock.d/               # Drop-in scripts to run after unlock
-    ├── 10-mount-shares.sh
-    └── 20-start-containers.sh
-
-/usr/local/bin/
-└── zfsvault-unlock              # Main unlock script
-
-/usr/lib/systemd/system/         # Package-provided units (.deb, etc.)
-├── zfsvault-unlock.service
-├── zfsvault-unlocked.service
-└── zfsvault-unlocked.path
-
-/etc/systemd/system/             # User overrides/customization
-└── getty@tty1.service.d/
-│   └── override.conf
-├── zfsvault-unlock.service      # User installed versions of services
-├── zfsvault-unlocked.service
-└── zfsvault-unlocked.path
-```
-
-The source repository layout looks roughly like:
-
-```text
-ZFS-Vault/
-├── Makefile
-├── README.md
-├── debian/                      # For .deb packaging
-│   ├── control
-│   ├── postinst
-│   └── prerm
-├── src/
-│   ├── bin/
-│   │   └── zfsvault-unlock
-│   └── systemd/
-│       └── *.service
-├── config/
-│   └── zfsvault.conf.example
-└── contrib/                     # Example post-unlock scripts
-    ├── lxc-starter.sh
-    └── smb-mounts.sh
-```
-
-### Config
-
-See the options described in [installation](#installation) for
-`/etc/zfsvault/zfsvault.conf`.
-
 ## Use Cases
 
 ### Core Feature: Single-Password ZFS Unlock
@@ -409,59 +413,328 @@ interactive boot process. The sequence of events is as follows:
 
 ## TODO Future Features
 
-- Clearly separate the core scripts from user defined configuration
-
-  - Location of vault
-  - pools to unlock and their path within the vault
-  - post-unlock actions.
-
 - Complete packaging, i.e., a `.deb` file?
 
-### Getty dependency
+## Installation
 
-This solution hijacks the getty service on tty1. This is Linux-specific because:
+This covers the manual installation steps.
 
-- Not all Unix systems use getty (some BSDs use different console managers)
+In the future, I may provide a `.deb` package or other packaging format, but for
+now you can install this manually by following these steps.
 
-- Some container systems don't have getty at all
+### Gather the required information
 
-- Embedded systems might have custom console handlers
+- Where do you want to put the vault itself?
 
-To make the unlock mechanism independent of getty:
+  - This is a small encrypted ZFS dataset that you unlock with a password and
+    will hold your other ZFS keys.
+    - This can be any local ZFS path. On Proxmox you can use `rpool/vault` or
+      any other local ZFS location
 
-```conf
-# CURRENT APPROACH: Override getty@tty1
-[Service]
-ExecStart=/usr/local/bin/zfsvault-unlock
+- What datasets do you want to unlock? List the datasets you want to unlock with
+  the vault, e.g.:
 
-# NEW zfsvault-unlock.service
-[Unit]
-Description=ZFS Vault Unlock Prompt
-After=basic.target
-Before=getty.target  # Run before ANY getty, not just tty1
+  - `tank/data`
+  - `tank/storage`
+  - `tank/archive`
+  - `tank/time-machine`
 
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/zfsvault-unlock
-StandardInput=tty
-StandardOutput=tty
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
+- Do you want to automatically start any containers or services after the
+  unlock? Or do you have another custom script you want to run?
 
-[Install]
-WantedBy=multi-user.target
+  - If so, list the container IDs or service names you want to start, e.g.:
+    - `pct start 100` (SMB container)
+    - `pct start 101` (Plex container)
+    - etc.
+  - Or you can provide a custom script that runs after the unlock, such as a
+    script that mounts shares or starts other services.
+
+### Create the config file
+
+- Create the config file at `/etc/zfsvault/zfsvault.conf`. Here's a simple
+  configuration example:
+
+  ```conf
+  [settings]
+  vault = tank/vault        # Path to the vault dataset
+  vault-key-dir = /keys     # Directory to store keys (relative to vault)
+  auto-mount = true         # Auto-mount ZFS volumes after unlock
+  post-scripts = true       # run /etc/zfsvault/post-unlock.d/ scripts
+  password-timeout = 30     # Seconds to wait for password
+  retry-count = 3           # Number of password retries before reboot
+  on-fail = exit            # Action on failed unlock (`reboot` or `exit` to login prompt)
+  unmount-after-use = true  # Unmount vault after unlock completes
+
+  [tank/data]
+  key = data.key             # path is relative to vault-key-dir
+  load-key-options = ""      # [optional] passed to `zfs load-key`
+  mount-options = "readonly" # [optional] passed to `zfs mount`
+
+  # minimal example for a storage dataset
+  [tank/archive]
+  key = archive.key
+  ```
+
+Important keys to pay attention to:
+
+- `vault`: the path to your ZFS vault dataset, e.g., `tank/vault` or
+  `rpool/vault`. You must [create this dataset](#vault-creation-best-practices)
+  yourself.
+- `on-fail`: what to do if the password is incorrect. Options are `reboot` or
+  `exit`. When run manually, `exit` just ends the script and returns to the
+  login prompt. When run as a systemd service, `exit` will not reboot the
+  system, but will return to the login prompt on `tty1`. You can sign in and run
+  the unlock script again manually if you want.
+
+### Create the vault
+
+Create the actual vault if you have not already. See
+[Vault creation best practices](#vault-creation-best-practices) for details.
+
+### Install the unlock script
+
+Install the unlock script:
+
+```sh
+# Install the unlock script
+$ sudo mkdir -p /usr/local/bin/
+$ sudo cp src/bin/zfsvault-unlock /usr/local/bin/
 ```
 
-Systems without getty can still use it. We're not modifying system services.
-It's clearer what the service does. Could potentially be triggered other ways
-(SSH, web UI, etc.)
+### Boot override - optional
 
-The getty override is simpler and works well for most Linux systems, but the
-standalone service is more portable. We could support both methods, but probably
-just change to this?
+If you want the ZFS vault unlock script to run automatically on boot, you can
+create a systemd override for the `getty@tty1.service.d/` folder.
 
-## Architecture diagram
+You can change `tty1` to another console if you want, but this is the default
+console on most systems.
+
+```sh
+# Create the override file
+# (From the source directory)
+$ sudo cp -r src/systemd/getty@tty1.service.d/ /etc/systemd/system/
+$ sudo systemctl daemon-reload
+```
+
+### Post-unlock scripts - optional
+
+If you just want a simple way to run scripts or commands after the ZFS unlock,
+and don't need systemd service dependencies, you can just put those scripts in
+`/etc/zfsvault/post-unlock.d/`. Then you can ignore the
+[setup services](#setup-services---optional) section.
+
+Your scripts will be executed in alphanumeric order after the ZFS vault is
+unlocked. This allows you to run any commands or scripts you need after the ZFS
+vault is unlocked, such as starting containers, mounting shares, or other
+actions.
+
+**WARNING**: these scripts will run as **root**!
+
+You can find an example script in `contrib/lxc-starter.sh` that starts Proxmox
+LXC containers that depend on the unlocked ZFS datasets. You can copy this
+script to `/etc/zfsvault/post-unlock.d/` and modify it as needed.
+
+### Setup services - optional
+
+Only if you want to use the service (systemd) related features, copy these files
+to `/etc/systemd/system`. This provides the `zfsvault-unlocked.service` which is
+started after the ZFS vault is unlocked. You can then make your services depend
+on this service to ensure they only start after the ZFS vault is unlocked.
+
+```sh
+# only if you want the zfsvault services
+$ cd src/systemd/ && sudo cp -r \
+  zfsvault-unlocked.service \
+  zfsvault-unlocked.path \
+  /etc/systemd/system/
+
+$ sudo systemctl daemon-reload
+```
+
+You can then set `After=zfsvault-unlocked.service` in your own service unit
+files to ensure they only start after the ZFS vault is unlocked.
+
+An example service is provided in `contrib/my-media-server.service` that shows
+how to make a service depend on the ZFS vault being unlocked. You can copy this
+service file to `/etc/systemd/system/` and modify it as needed.
+
+#### A word about onboot containers
+
+If you have LXC containers that will depend on the unlocked ZFS datasets, you
+may need to set them to NOT start automatically on boot, so that they do not
+start before the ZFS vault is unlocked. You can do this with the `pct set`
+command:
+
+```sh
+# Disable auto-start for LXC containers that depend on the ZFS vault
+pct set 100 --onboot 0
+pct set 101 --onboot 0
+# Add other containers as needed
+```
+
+### Test your setup
+
+Test the setup:
+
+```sh
+# Manually:
+$ /usr/local/bin/zfsvault-unlock --help
+
+# If using systemd service:
+
+# Check if the path watcher is active
+$ systemctl status zfsvault-unlocked.path
+```
+
+## Backup strategy
+
+As mentioned above, you're placing the keys necessary to unlock your data in
+this vault. If there's a catastrophic failure of the vault, you can lose access
+to all your data. Therefore, it is recommended to have a backup strategy for
+both the vault and the keys stored within it.
+
+## Uninstallation
+
+These changes are non-destructive and can be easily reverted. If you want to
+remove the ZFS Vault unlock integration, you can follow these steps to uninstall
+the solution cleanly.
+
+### Step 1: Restore Container Auto-Start
+
+Only do this if you had containers set to start automatically on boot before
+installing this solution. If you did not change the `onboot` setting for your
+containers, you can skip this step.
+
+```bash
+# Re-enable onboot for any containers that should auto-start
+pct set 100 --onboot 1
+pct set 101 --onboot 1
+# Add other containers as needed
+```
+
+### Step 2: Remove Custom Services
+
+If you installed the `zfsvault-unlocked.service` and `zfsvault-unlocked.path`
+files, you can remove them to clean up the system. This will stop the automatic
+unlocking and post-unlock actions. If you did not install these services, you
+can skip this step.
+
+```bash
+# Stop and disable services
+systemctl stop zfsvault-unlocked.path
+systemctl disable zfsvault-unlocked.path
+systemctl stop zfsvault-unlocked.service
+
+# Remove service files
+rm -f /etc/systemd/system/zfsvault-unlocked.service
+rm -f /etc/systemd/system/zfsvault-unlocked.path
+
+# Remove (or move) any post-unlock.d/ scripts you added
+rm -rf /etc/zfsvault/post-unlock.d/
+
+# Reload systemd
+systemctl daemon-reload
+```
+
+### Step 3: Restore Original Getty
+
+This step removes the override on the `getty` service, restoring the normal
+login prompt on `tty1`. If you did not use the boot override feature, you can
+skip this step.
+
+```bash
+# Remove getty override
+rm -rf /etc/systemd/system/getty@tty1.service.d/
+
+# Reload systemd
+systemctl daemon-reload
+
+# Restart getty to restore normal login
+systemctl restart getty@tty1
+```
+
+### Step 4: Clean Up Runtime Files
+
+```bash
+# Remove the main script
+rm -f /usr/local/bin/zfsvault-unlock
+
+# Remove the marker file (or will be removed on next boot)
+rm -f /run/zfsvault-unlocked-marker
+
+# Verify clean state
+systemctl list-unit-files | grep zfsvault
+systemctl status getty@tty1
+```
+
+After uninstall, the system will boot normally with standard login prompts.
+
+## Troubleshooting
+
+```bash
+# Check if path watcher is active
+systemctl status zfsvault-unlocked.path
+
+# Check container startup logs
+journalctl -u zfsvault-unlocked.service
+
+# Check if marker file exists after unlock
+ls -la /run/zfsvault-unlocked-marker
+
+# Test container startup script manually
+/usr/local/bin/zfsvault-unlock
+
+# View unlock script logs
+journalctl | grep "zfsvault-unlock"
+```
+
+## Code architecture
+
+The installed file layout looks like this:
+
+```text
+/etc/zfsvault/
+├── zfsvault.conf                # Main configuration
+└── post-unlock.d/               # Drop-in scripts to run after unlock
+    ├── 10-mount-shares.sh
+    └── 20-start-containers.sh
+
+/usr/local/bin/
+└── zfsvault-unlock              # Main unlock script
+
+/usr/lib/systemd/system/         # Package-provided units (.deb, etc.)
+├── zfsvault-unlocked.service
+└── zfsvault-unlocked.path
+
+/etc/systemd/system/             # User overrides/customization
+└── getty@tty1.service.d/
+│   └── override.conf
+├── zfsvault-unlocked.service    # User installed versions of services
+└── zfsvault-unlocked.path
+```
+
+The source repository layout looks roughly like:
+
+```text
+ZFS-Vault/
+├── Makefile
+├── README.md
+├── debian/                      # For .deb packaging (future)
+│   ├── control
+│   ├── postinst
+│   └── prerm
+├── src/
+│   ├── bin/
+│   │   └── zfsvault-unlock
+│   └── systemd/
+│       └── *.(service|path)
+├── config/
+│   └── zfsvault.conf.example
+└── contrib/                     # Example post-unlock scripts
+    └── lxc-starter.sh
+```
+
+### Architecture diagram
 
 Gemini made this.
 
@@ -488,188 +761,3 @@ Gemini made this.
                                                                               │ (Plex, Samba, LXC, etc)│
                                                                               └────────────────────────┘
 ```
-
-## Installation
-
-(This is the desired future installation path.)
-
-1. Gather the required information:
-
-   1. Where do you want to put the vault itself?
-      - This is a small encrypted ZFS dataset that you unlock with a password
-        and will hold your other ZFS keys.
-        - This can be any local ZFS path. On Proxmox you can use `rpool/vault`
-          or any other local ZFS location
-   2. What datasets do you want to unlock?
-
-      - List the datasets you want to unlock with the vault, e.g.:
-        - `tank/data`
-        - `tank/storage`
-        - `tank/archive`
-        - `tank/time-machine`
-
-   3. Do you want to automatically start any containers or services after the
-      unlock? Or do you have another custom script you want to run?
-
-      - If so, list the container IDs or service names you want to start, e.g.:
-        - `pct start 100` (SMB container)
-        - `pct start 101` (Plex container)
-        - etc.
-      - Or you can provide a custom script that runs after the unlock, such as a
-        script that mounts shares or starts other services.
-
-2. Create the config file at `/etc/zfsvault/zfsvault.conf`. Here's a simple
-   configuration example:
-
-   ```conf
-   [settings]
-   vault = tank/vault   # Path to the vault dataset
-   vault-key-dir = /keys  # Directory to store keys (relative to vault)
-   auto-mount = true    # Auto-mount ZFS volumes after unlock
-   post-scripts = true  # run /etc/zfsvault/post-unlock.d/ scripts
-   password_timeout = 30         # Seconds to wait for password
-   retry-count = 3      # Number of password retries before reboot
-   on-fail = reboot     # Action on failed unlock (reboot or exit or shell)
-   unmount_after_user = true  # Unmount vault after unlock completes
-
-   [tank/data]
-   key = data.key  # path is relative to vault-key-dir
-   load-key-options = "" # [optional] passed to `zfs load-key`
-   mount-options = "readonly" # [optional] passed to `zfs mount`
-
-   # minimal example for a storage dataset
-   [tank/archive]
-   key = archive.key
-   ```
-
-3. Create the actual vault if you have not already. See
-   [Vault creation best practices](#vault-creation-best-practices) for details.
-
-4. Only if you want to use the service (systemd) related features, copy these
-   files to `/etc/systemd/system`. Only include the `getty@tty1.service.d/`
-   folder if you want the boot override to run the unlock script on boot. Also,
-   you can change `tty1` to another console if you want, but this is the default
-   console on most systems.
-
-   ```sh
-   # Need sudo / root here
-
-   # only if you want the zfsvault services
-   $ cd src/systemd/ && cp -r \
-     zfsvault-unlock.service \
-     zfsvault-unlocked.service \
-     zfsvault-unlocked.path \
-     getty@tty1.service.d/ \  # ONLY if you want the boot override
-     /etc/systemd/system/
-
-   $ systemctl daemon-reload
-   ```
-
-5. Install the unlock script:
-
-   ```sh
-   # Install the unlock script
-   $ mkdir -p /usr/local/bin/
-   $ cp src/bin/zfsvault-unlock /usr/local/bin/
-   ```
-
-6. Test the setup:
-
-   ```sh
-   # Manually:
-   $ /usr/local/bin/zfsvault-unlock --help
-
-   # Systemd service:
-   $ systemctl start zfsvault-unlock.service
-   ```
-
-7. If you need to uninstall, see
-   [uninstall instructions](#uninstall-instructions) below.
-
-## Troubleshooting
-
-```bash
-# Check if path watcher is active
-systemctl status zfsvault-unlocked.path
-
-# Check container startup logs
-journalctl -u zfsvault-unlocked.service
-
-# Check if marker file exists after unlock
-ls -la /run/zfsvault-unlocked-marker
-
-# Test container startup script manually
-/usr/local/bin/zfsvault-unlock
-
-# View unlock script logs
-journalctl | grep "zfsvault-unlock"
-```
-
-## Uninstall Instructions
-
-### Step 1: Restore Container Auto-Start
-
-Only do this if you had containers set to start automatically on boot before
-installing this solution. If you did not change the `onboot` setting for your
-containers, you can skip this step.
-
-```bash
-# Re-enable onboot for any containers that should auto-start
-pct set 100 --onboot 1
-pct set 101 --onboot 1
-# Add other containers as needed
-```
-
-### Step 2: Remove Custom Services
-
-```bash
-# Stop and disable services
-systemctl stop zfsvault-containers.path
-systemctl disable zfsvault-containers.path
-systemctl stop zfsvault-unlocked.service
-
-# Remove service files
-rm -f /etc/systemd/system/zfsvault-unlock.service
-rm -f /etc/systemd/system/zfsvault-unlocked.service
-rm -f /etc/systemd/system/zfsvault-unlocked.path
-
-# Remove (or move) any post-unlock.d/ scripts you added
-rm -rf /etc/zfsvault/post-unlock.d/
-
-# Remove scripts
-rm -f /usr/local/bin/zfsvault-unlock
-
-# Reload systemd
-systemctl daemon-reload
-```
-
-### Step 3: Restore Original Getty
-
-This step removes the override on the `getty` service, restoring the normal
-login prompt on `tty1`. If you did not use the boot override feature, you can
-skip this step.
-
-```bash
-# Remove getty override
-rm -rf /etc/systemd/system/getty@tty1.service.d/
-
-# Reload systemd
-systemctl daemon-reload
-
-# Restart getty to restore normal login
-systemctl restart getty@tty1
-```
-
-### Step 4: Clean Up Runtime Files
-
-```bash
-# Remove any marker files
-rm -f /run/zfsvault-unlocked-marker
-
-# Verify clean state
-systemctl list-unit-files | grep zfsvault
-systemctl status getty@tty1
-```
-
-After uninstall, the system will boot normally with standard login prompts and
-automatic container startup (if they have `onboot=1`).

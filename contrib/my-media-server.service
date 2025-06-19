@@ -1,0 +1,11 @@
+# /etc/systemd/system/my-media-server.service
+
+# This is an example of making a service dependent on the ZFS vault unlock.
+
+[Unit]
+Description=My Media Server
+After=zfsvault-unlocked.service
+Requires=zfsvault-unlocked.service
+
+[Service]
+ExecStart=/usr/bin/my-media-server

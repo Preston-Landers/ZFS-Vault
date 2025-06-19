@@ -1,7 +1,0 @@
-[Unit]
-Description=ZFS Encrypted Datasets Manually Unlocked and Mounted
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'test -f /run/zfs-unlocked-marker'
-RemainAfterExit=yes
