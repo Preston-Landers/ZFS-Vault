@@ -200,7 +200,7 @@ yourself, using the standard ZFS tools. See
 The "Vault" itself is a password-protected ZFS dataset, which can be stored on
 any accessible local drive. The vault is meant to store ZFS keys only. Although
 it is possible to store additional files there, it's recommended not to, and to
-allow the default behavior (TODO) of closing the vault when the unlock script is
+allow the default behavior of closing the vault when the unlock script is
 finished. The vault will take up minimal space on the disk.
 
 - This solution is designed to be non-invasive and easily reversible.
@@ -457,18 +457,18 @@ now you can install this manually by following these steps.
   ```conf
   [settings]
   vault = tank/vault        # Path to the vault dataset
-  vault-key-dir = /keys     # Directory to store keys (relative to vault)
-  auto-mount = true         # Auto-mount ZFS volumes after unlock
-  post-scripts = true       # run /etc/zfsvault/post-unlock.d/ scripts
-  password-timeout = 30     # Seconds to wait for password
-  retry-count = 3           # Number of password retries before reboot
-  on-fail = exit            # Action on failed unlock (`reboot` or `exit` to login prompt)
-  unmount-after-use = true  # Unmount vault after unlock completes
+  vault_key_dir = /keys     # Directory to store keys (relative to vault)
+  auto_mount = true         # Auto-mount ZFS volumes after unlock
+  post_scripts = true       # run /etc/zfsvault/post-unlock.d/ scripts
+  password_timeout = 30     # Seconds to wait for password
+  retry_count = 3           # Number of password retries before reboot
+  on_fail = exit            # Action on failed unlock (`reboot` or `exit` to login prompt)
+  unmount_after_use = true  # Unmount vault after unlock completes
 
   [tank/data]
-  key = data.key             # path is relative to vault-key-dir
-  load-key-options = ""      # [optional] passed to `zfs load-key`
-  mount-options = "readonly" # [optional] passed to `zfs mount`
+  key = data.key             # path is relative to vault_key_dir
+  load_key_options = ""      # [optional] passed to `zfs load-key`
+  mount_options = "readonly" # [optional] passed to `zfs mount`
 
   # minimal example for a storage dataset
   [tank/archive]

@@ -1,5 +1,14 @@
 {
-  "cSpell.words": ["homelab", "Jellyfin", "onboot", "rpool", "ZFSVAULT"],
+  "cSpell.words": [
+    "agetty",
+    "homelab",
+    "Jellyfin",
+    "mountpoint",
+    "noclear",
+    "onboot",
+    "rpool",
+    "ZFSVAULT"
+  ],
   "editor.formatOnSave": true,
   "markdown.extension.toc.levels": "2..3"
 }

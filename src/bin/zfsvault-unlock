@@ -247,7 +247,7 @@ attempts=0
 max_attempts="${config[retry_count]:-3}"
 
 read_password() {
-    local timeout="${config[password - timeout]:-0}"
+    local timeout="${config[password_timeout]:-0}"
     if command -v systemd-ask-password &>/dev/null && [[ -n "${SYSTEMD_EXEC_PID:-}" ]]; then
         systemd-ask-password --timeout="$timeout" "Enter ZFS vault password:"
     else
@@ -331,8 +331,8 @@ for key in "${!datasets[@]}"; do
         ((total_datasets++))
         dataset="${BASH_REMATCH[1]}"
         keyfile=$(get_dataset_config "$dataset" "key")
-        load_opts=$(get_dataset_config "$dataset" "load-key-options")
-        mount_opts=$(get_dataset_config "$dataset" "mount-options")
+        load_opts=$(get_dataset_config "$dataset" "load_key_options")
+        mount_opts=$(get_dataset_config "$dataset" "mount_options")
 
         if [[ ! -f "${key_dir}/${keyfile}" ]]; then
             log_error "Key file not found: ${key_dir}/${keyfile}"
@@ -359,7 +359,10 @@ for key in "${!datasets[@]}"; do
 done
 
 # Unmount vault if configured
-if [[ "${config[unmount_after_use]}" == "true" ]]; then
+
+set UNMOUNT_AFTER_USE="${config[unmount_after_use]:-true}"
+
+if [[ "$UNMOUNT_AFTER_USE" == "true" ]]; then
     zfs umount "${config[vault]}"
     log_info "zfsvault-unlock: Vault unmounted"
 fi
@@ -412,7 +415,7 @@ else
 fi
 
 # If vault is still mounted and should be unmounted, do it now
-if [[ "${config[unmount_after_use]}" != "true" ]] && [[ -n "$vault_mount" ]]; then
+if [[ "$UNMOUNT_AFTER_USE" != "true" ]] && [[ -n "$vault_mount" ]]; then
     # Vault is still mounted but we're about to exec
     log_debug "Vault remains mounted at: $vault_mount"
 fi
