@@ -370,10 +370,12 @@ interactive boot process. The sequence of events is as follows:
     main console (`tty1`) and prompts the user for the single passphrase needed
     to decrypt the primary "vault" dataset.
 
-    - TODO: more about behaviors of the unlock script here. To be refined.
-    - For example, if the password is incorrect, it currently waits a few
-      seconds and reboots. We may refine this to allow retrying the password or
-      canceling the unlock without rebooting.
+    - Depending on how ZFS-Vault is configured, it may allow multiple password
+      attempts. The default behavior on password failure (`on_fail`) is to
+      `exit` back to the regular login prompt. You can then login and run
+      `/usr/local/bin/zfsvault-unlock` manually again. You can also set
+      `on_fail = reboot` in the configuration file to reboot the system to try
+      again.
 
 3.  **Key Loading & Cascade:** Once the vault is unlocked, the script accesses
     the key files stored within it and uses `zfs load-key` to unlock all other
@@ -400,13 +402,22 @@ interactive boot process. The sequence of events is as follows:
     "signal service". Other services of your choosing can then depend on this
     service to activate only after the ZFS vault has been unlocked.
 
-    - An example service script is provided that starts LXC containers that
-      depend on the unlocked ZFS datasets. This service can be customized to
-      start any services you need, such as file sharing (Samba), media servers
-      (Plex), or other applications that require access to the decrypted
-      datasets.
+    - An example service script is provided that starts an example binary
+      representing a media server. You can customize this script to start any
+      services you need, such as file sharing (Samba), media servers (Plex), or
+      other applications that require access to the decrypted datasets.
 
-8.  **Console Hand-off:** Finally, after creating the marker file, the initial
+8.  **post-unlock scripts:** An alternative to creating custom services that
+    depend on `zfsvault-unlocked` is to use post-unlock scripts. If you have
+    placed any scripts in the `/etc/zfsvault/post-unlock.d/` directory, they
+    will be executed in alphanumeric order after the ZFS vault is unlocked.
+
+    This allows you to run any commands or scripts you need after the ZFS vault
+    is unlocked, such as starting containers, mounting shares, or other actions.
+    This is a simpler alternative to using systemd services for post-unlock
+    actions. These scripts will run as root.
+
+9.  **Console Hand-off:** Finally, after creating the marker file, the initial
     `zfsvault-unlock` script completes its job by handing off control to the
     standard `getty` process, which then presents the normal login prompt on the
     console.
@@ -451,6 +462,13 @@ now you can install this manually by following these steps.
 
 ### Create the config file
 
+- Create the `/etc/zfsvault` folder:
+
+  ```sh
+  sudo mkdir /etc/zfsvault
+  sudo chmod 700 /etc/zfsvault
+  ```
+
 - Create the config file at `/etc/zfsvault/zfsvault.conf`. Here's a simple
   configuration example:
 
@@ -480,11 +498,19 @@ Important keys to pay attention to:
 - `vault`: the path to your ZFS vault dataset, e.g., `tank/vault` or
   `rpool/vault`. You must [create this dataset](#vault-creation-best-practices)
   yourself.
-- `on-fail`: what to do if the password is incorrect. Options are `reboot` or
+- `on_fail`: what to do if the password is incorrect. Options are `reboot` or
   `exit`. When run manually, `exit` just ends the script and returns to the
   login prompt. When run as a systemd service, `exit` will not reboot the
   system, but will return to the login prompt on `tty1`. You can sign in and run
   the unlock script again manually if you want.
+
+For maximum security, set the permissions on the config file to `600` so
+that only root can read it:
+
+```sh
+# Set restrictive permissions on the config file
+$ sudo chmod 600 /etc/zfsvault/zfsvault.conf
+```
 
 ### Create the vault
 
@@ -499,6 +525,7 @@ Install the unlock script:
 # Install the unlock script
 $ sudo mkdir -p /usr/local/bin/
 $ sudo cp src/bin/zfsvault-unlock /usr/local/bin/
+$ sudo chmod 755 /usr/local/bin/zfsvault-unlock
 ```
 
 ### Boot override - optional
@@ -527,6 +554,17 @@ Your scripts will be executed in alphanumeric order after the ZFS vault is
 unlocked. This allows you to run any commands or scripts you need after the ZFS
 vault is unlocked, such as starting containers, mounting shares, or other
 actions.
+
+```sh
+$ sudo mkdir -p /etc/zfsvault/post-unlock.d/
+$ sudo chmod 700 /etc/zfsvault/post-unlock.d/
+
+# Example script to mount shares or start containers
+# Note: edit this script to suit your needs!
+$ sudo cp contrib/lxc-starter.sh /etc/zfsvault/post-unlock.d/20-start-containers.sh
+
+$ sudo chmod 700 /etc/zfsvault/post-unlock.d/20-start-containers.sh
+```
 
 **WARNING**: these scripts will run as **root**!
 
@@ -578,7 +616,7 @@ Test the setup:
 
 ```sh
 # Manually:
-$ /usr/local/bin/zfsvault-unlock --help
+$ sudo /usr/local/bin/zfsvault-unlock --help
 
 # If using systemd service:
 

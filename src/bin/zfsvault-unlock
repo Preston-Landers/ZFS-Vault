@@ -9,8 +9,6 @@ CONFIG_FILE="/etc/zfsvault/zfsvault.conf"
 # TODO: future features?
 # --dry-run
 
-# TODO: check if /run/zfsvault-unlocked-marker already exists?
-
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -186,8 +184,20 @@ parse_config "${CONFIG_FILE}" || {
     handle_error "Failed to parse configuration file: $CONFIG_FILE"
 }
 
+# Check if already unlocked
+if [[ -f /run/zfsvault-unlocked-marker ]]; then
+    if $BOOT_MODE; then
+        # Already unlocked, just hand off to getty
+        log_info "ZFS already unlocked, proceeding to login."
+        call_getty
+    else
+        log_always "ZFS datasets already unlocked (/run/zfsvault-unlocked-marker exists)."
+        exit 0
+    fi
+fi
+
 # Log script start
-log_info "zfsvault-unlock: Starting ZFS Unlock Script"
+log_info "Starting ZFS Unlock Script."
 
 log_debug "\nAll elements in config:"
 for key in "${!config[@]}"; do
@@ -267,7 +277,7 @@ while [ $attempts -lt $max_attempts ]; do
 
     if echo "$PASSWORD" | zfs load-key "${config[vault]}" 2>/dev/null; then
         PASSWORD=""
-        log_info "zfsvault-unlock: Vault unlocked successfully"
+        log_info "Vault unlocked successfully."
         break
     else
         PASSWORD=""
@@ -283,7 +293,7 @@ unset PASSWORD
 
 # Handle failure
 if [ $attempts -eq $max_attempts ]; then
-    log_error "zfsvault-unlock: Max password attempts reached"
+    log_error "Max password attempts reached."
     case "${config[on_fail]}" in
     reboot)
         log_always "Max attempts reached. Rebooting in 5 seconds..."
@@ -343,7 +353,7 @@ for key in "${!datasets[@]}"; do
         # Load key
         if cat "${key_dir}/${keyfile}" | zfs load-key $load_opts "$dataset"; then
             unlocked_datasets+=("$dataset")
-            log_info "zfsvault-unlock: Unlocked $dataset"
+            log_info "**Unlocked** $dataset"
 
             # Mount if auto-mount is enabled
             if [[ "${config[auto_mount]}" == "true" ]]; then
@@ -351,20 +361,28 @@ for key in "${!datasets[@]}"; do
                     log_error "Failed to mount $dataset after unlock"
                 fi
             fi
+
+            # Also mount any child datasets
+            zfs list -H -o name -r "$dataset" | while read -r child; do
+                if [[ "$child" != "$dataset" ]]; then
+                    zfs mount "$child" 2>/dev/null || true
+                fi
+            done
+
         else
             failed_datasets+=("$dataset")
-            log_error "zfsvault-unlock: Failed to unlock $dataset"
+            log_error "Failed to unlock $dataset"
         fi
     fi
 done
 
 # Unmount vault if configured
 
-set UNMOUNT_AFTER_USE="${config[unmount_after_use]:-true}"
+UNMOUNT_AFTER_USE="${config[unmount_after_use]:-true}"
 
 if [[ "$UNMOUNT_AFTER_USE" == "true" ]]; then
     zfs umount "${config[vault]}"
-    log_info "zfsvault-unlock: Vault unmounted"
+    log_info "Vault unmounted."
 fi
 
 # Create marker file - systemd path watcher handles the rest
