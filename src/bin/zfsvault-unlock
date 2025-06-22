@@ -383,6 +383,13 @@ UNMOUNT_AFTER_USE="${config[unmount_after_use]:-true}"
 if [[ "$UNMOUNT_AFTER_USE" == "true" ]]; then
     zfs umount "${config[vault]}"
     log_info "Vault unmounted."
+
+    # Also unload the key so it requires password to mount again
+    if zfs unload-key "${config[vault]}" 2>/dev/null; then
+        log_info "zfsvault-unlock: Vault key unloaded"
+    else
+        log_error "zfsvault-unlock: Failed to unload vault key"
+    fi
 fi
 
 # Create marker file - systemd path watcher handles the rest
