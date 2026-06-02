@@ -8,6 +8,11 @@ retry_count = 3           # Number of password retries before reboot
 on_fail = exit            # Action on failed unlock (`reboot` or `exit` to login prompt)
 unmount_after_use = true  # Unmount vault after unlock completes
 
+# Password prompt UX
+quiet_console = true      # Lower console loglevel during the prompt so boot/kernel messages don't obscure it
+use_whiptail = true       # Use a whiptail dialog box if installed; false = always use the plain text banner
+prompt_message = Enter password to unlock ZFS Vault   # Text shown on the password prompt
+
 [tank/data]
 key = data.key             # path is relative to vault_key_dir
 load_key_options = ""      # [optional] passed to `zfs load-key`

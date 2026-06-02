@@ -1,5 +1,5 @@
 #!/bin/bash
-# zfsvault-unlock v0.1.0
+# zfsvault-unlock v0.2.0
 
 # Defaults
 BOOT_MODE=false
@@ -78,6 +78,7 @@ log_debug() {
 # Error handler function
 handle_error() {
     local error_msg="$1"
+    restore_console
     log_error "$error_msg"
     echo -e "\n*** ZFS Vault Unlock Error ***"
     echo "$error_msg"
@@ -95,6 +96,7 @@ handle_error() {
 
 handle_interrupt() {
     log_error "Interrupt received, cleaning up..."
+    restore_console
     # Clear any sensitive data
     unset PASSWORD
     # Unmount vault if it was mounted
@@ -108,6 +110,52 @@ call_getty() {
     log_debug "Calling: exec /sbin/agetty -o '-p -- \\u' --noclear tty1 linux"
     # TODO: more portable way to do this...? Override in config file?
     exec /sbin/agetty -o '-p -- \\u' --noclear tty1 linux
+}
+
+# --- Console quieting -------------------------------------------------------
+# While prompting, lower the console loglevel so kernel/boot messages don't
+# scribble over the password UI. Messages still reach the kernel ring buffer
+# and the journal; only output to the console is suppressed. Always paired with
+# restore_console (including via the error/interrupt handlers above).
+saved_printk=""
+
+quiet_console() {
+    [[ "${config[quiet_console]:-true}" == "true" ]] || return 0
+    if [[ -w /proc/sys/kernel/printk ]]; then
+        saved_printk=$(cat /proc/sys/kernel/printk 2>/dev/null)
+        # Writing a single integer sets only the console loglevel (field 1).
+        echo 1 >/proc/sys/kernel/printk 2>/dev/null || true
+        log_debug "Console quieted (was: ${saved_printk:-unknown})"
+    fi
+}
+
+restore_console() {
+    if [[ -n "$saved_printk" ]] && [[ -w /proc/sys/kernel/printk ]]; then
+        echo "$saved_printk" >/proc/sys/kernel/printk 2>/dev/null || true
+        log_debug "Console loglevel restored (${saved_printk})"
+    fi
+    saved_printk=""
+}
+
+# --- Password prompt UI -----------------------------------------------------
+# True if whiptail should be used: enabled in config (default) and installed.
+use_whiptail() {
+    [[ "${config[use_whiptail]:-true}" == "true" ]] || return 1
+    command -v whiptail &>/dev/null
+}
+
+# Draw a clear, hard-to-miss banner for the non-whiptail prompt paths. Writes to
+# stderr (the tty) so it is never captured by the $(read_password) substitution.
+draw_banner() {
+    local msg="$1"
+    {
+        printf '\033[2J\033[H'          # clear screen, cursor home
+        printf '\033[1;37;44m'          # bold white on blue
+        printf '  ==========================================================\n'
+        printf '  %s\n' "$msg"
+        printf '  ==========================================================\n'
+        printf '\033[0m\n'              # reset attributes
+    } >&2
 }
 
 # Check that zfs exists
@@ -256,22 +304,53 @@ done
 attempts=0
 max_attempts="${config[retry_count]:-3}"
 
+# Read the vault password using the best available UI:
+#   1. whiptail modal dialog  (unless disabled in config or not installed)
+#   2. systemd-ask-password   (when running under systemd)
+#   3. plain `read`           (last-resort fallback)
+# Only the entered password is written to stdout; all UI goes to the tty (stderr)
+# so it survives the surrounding $(read_password) command substitution.
+# $1: optional status note to show (e.g. a retry message); may be empty.
 read_password() {
+    local note="$1"
     local timeout="${config[password_timeout]:-0}"
+    local prompt="${config[prompt_message]:-Enter password to unlock ZFS Vault}"
+
+    if use_whiptail; then
+        # whiptail draws its own full-screen modal, so no banner is needed.
+        # The 3>&1 1>&2 2>&3 dance routes the UI to the tty and the entered
+        # value to stdout for capture.
+        local box_text="$prompt"
+        [[ -n "$note" ]] && box_text=$(printf '%s\n\n%s' "$note" "$prompt")
+        whiptail --title "ZFS Vault" --passwordbox "$box_text" 12 70 3>&1 1>&2 2>&3
+        return $?
+    fi
+
+    # Non-whiptail paths: draw the banner so the prompt is unmistakable.
+    draw_banner "$prompt"
+    [[ -n "$note" ]] && printf '  %s\n\n' "$note" >&2
+
     if command -v systemd-ask-password &>/dev/null && [[ -n "${SYSTEMD_EXEC_PID:-}" ]]; then
-        systemd-ask-password --timeout="$timeout" "Enter ZFS vault password:"
+        systemd-ask-password --timeout="$timeout" "$prompt:"
     else
-        # Fallback to standard read
-        read -s -p "Enter vault password: " password
-        echo # New line after password
-        echo "$password"
+        local password
+        read -rs -p "$prompt: " password
+        echo >&2 # newline after hidden input (to the tty, not stdout)
+        printf '%s\n' "$password"
     fi
 }
 
-# systemd-based version
+# Quiet the console for the duration of the prompt so boot/kernel messages
+# don't obscure it; restored as soon as the prompt phase ends (and by the
+# error/interrupt handlers if we bail out early).
+quiet_console
+
 while [ $attempts -lt $max_attempts ]; do
-    PASSWORD=$(read_password) || {
-        # User pressed Ctrl+C or another error
+    note=""
+    [[ $attempts -gt 0 ]] && note="Incorrect password. Try again ($attempts/$max_attempts)."
+
+    PASSWORD=$(read_password "$note") || {
+        # User cancelled (Ctrl+C / Esc) or the prompt errored
         handle_error "Password prompt cancelled"
     }
 
@@ -284,12 +363,12 @@ while [ $attempts -lt $max_attempts ]; do
         ((attempts++))
         if [ $attempts -lt $max_attempts ]; then
             log_debug "Incorrect password. Try again ($attempts/$max_attempts)"
-            echo "Incorrect password. Try again ($attempts/$max_attempts)."
         fi
     fi
 done
 
 unset PASSWORD
+restore_console
 
 # Handle failure
 if [ $attempts -eq $max_attempts ]; then

@@ -483,6 +483,11 @@ now you can install this manually by following these steps.
   on_fail = exit            # Action on failed unlock (`reboot` or `exit` to login prompt)
   unmount_after_use = true  # Unmount vault after unlock completes
 
+  # Password prompt UX (all optional)
+  quiet_console = true      # Lower console loglevel during the prompt so boot messages don't obscure it
+  use_whiptail = true       # Use a whiptail dialog box if installed; false = always use the plain text banner
+  prompt_message = Enter password to unlock ZFS Vault   # Text shown on the password prompt
+
   [tank/data]
   key = data.key             # path is relative to vault_key_dir
   load_key_options = ""      # [optional] passed to `zfs load-key`
@@ -511,6 +516,31 @@ that only root can read it:
 # Set restrictive permissions on the config file
 $ sudo chmod 600 /etc/zfsvault/zfsvault.conf
 ```
+
+#### Customizing the password prompt
+
+During boot, the system continues to print kernel and service messages to the
+console (`tty1`). Without intervention these can scroll over the password
+prompt and make it easy to miss. The following optional settings control how the
+prompt is presented:
+
+- `quiet_console` (default `true`): while the prompt is shown, the console log
+  level is lowered so boot/kernel messages don't obscure it, then restored
+  afterward. Messages are only suppressed on the console — nothing is lost from
+  `dmesg` or the journal. The original log level is always restored, including
+  if the unlock is cancelled or fails.
+- `use_whiptail` (default `true`): if [`whiptail`](https://linux.die.net/man/1/whiptail)
+  is installed, the password is requested in a clear, full-screen dialog box.
+  whiptail ships by default on Debian/Proxmox. Set this to `false` to always use
+  the plain text banner instead, even if whiptail is installed. If whiptail is
+  not installed, the plain banner is used automatically — there is no hard
+  dependency.
+  - **Note:** when whiptail is used, the `password_timeout` setting does not
+    apply (whiptail has no timeout option) and the prompt waits indefinitely.
+    This is fine for most setups. If you rely on `password_timeout`, set
+    `use_whiptail = false`.
+- `prompt_message` (default `Enter password to unlock ZFS Vault`): the text shown
+  on the prompt, whether in the whiptail box or the plain banner.
 
 ### Create the vault
 
